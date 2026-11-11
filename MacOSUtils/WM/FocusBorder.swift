@@ -80,7 +80,12 @@ private final class BorderOverlay {
         window = w
     }
 
-    func show(around axFrame: CGRect, above windowID: CGWindowID, color: CGColor,
+    /// Just above ordinary windows. The focused window's outline lives here so that clicking the
+    /// window (which raises it) can never put the window — and its dark focused-window shadow —
+    /// on top of the outline. That shadow falling across the stroke is what made the colour shift.
+    static let activeLevel = NSWindow.Level(rawValue: NSWindow.Level.normal.rawValue + 1)
+
+    func show(around axFrame: CGRect, above windowID: CGWindowID, color: CGColor, isActive: Bool,
               style: BorderStyle, primaryHeight: CGFloat) {
         let outer = axFrame.insetBy(dx: -style.width, dy: -style.width)
         // AX is top-left origin; AppKit is bottom-left of the primary display.
@@ -93,9 +98,16 @@ private final class BorderOverlay {
             layer.borderColor = color
         }
         if window.frame != frame { window.setFrame(frame, display: true) }
-        window.order(.above, relativeTo: Int(windowID))
-        // If the window server refused relative ordering, still show it at its level.
-        if !window.isVisible { window.orderFrontRegardless() }
+        if isActive {
+            if window.level != Self.activeLevel { window.level = Self.activeLevel }
+            window.orderFrontRegardless()
+        } else {
+            // Unfocused outlines stay among normal windows, just above their target, so they
+            // don't draw over a window that overlaps their target.
+            if window.level != .normal { window.level = .normal }
+            window.order(.above, relativeTo: Int(windowID))
+            if !window.isVisible { window.orderFrontRegardless() }
+        }
     }
 
     func hide() { window.orderOut(nil) }
@@ -120,13 +132,13 @@ final class BorderManager {
             let color = BorderStyle.cgColor(inactiveARGB)
             for target in inactive {
                 overlay(for: target.id).show(around: target.frame, above: target.id, color: color,
-                                             style: style, primaryHeight: h)
+                                             isActive: false, style: style, primaryHeight: h)
                 keep.insert(target.id)
             }
         }
         if let active {
             overlay(for: active.id).show(around: active.frame, above: active.id,
-                                         color: BorderStyle.cgColor(style.activeARGB),
+                                         color: BorderStyle.cgColor(style.activeARGB), isActive: true,
                                          style: style, primaryHeight: h)
             keep.insert(active.id)
         }
