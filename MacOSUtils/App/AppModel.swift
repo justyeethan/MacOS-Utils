@@ -61,6 +61,7 @@ final class AppModel {
     /// Set by the menu-bar panel so the bar's context menu can open Settings.
     @ObservationIgnored var openSettingsWindow: (() -> Void)?
     @ObservationIgnored private var terminateObserver: NSObjectProtocol?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private let scrollStore: ScrollSettingsStore
     @ObservationIgnored private let scrollTap: ScrollEventTap
     @ObservationIgnored private var trustPoll: Timer?
@@ -90,6 +91,11 @@ final class AppModel {
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [unowned self] _ in
             MainActor.assumeIsolated { self.stopAll() }
+        }
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [unowned self] _ in
+            MainActor.assumeIsolated { self.scrollTap.ensureEnabled() }   // WM handles its own wake
         }
         // SwiftUI builds this model while the app is still launching — before AppKit can
         // position windows. Creating the bar (or border) windows here crashed in

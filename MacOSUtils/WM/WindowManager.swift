@@ -86,6 +86,10 @@ final class WindowManager {
     /// On an empty workspace that app (now hidden) stays frontmost; focus reports from it are
     /// leftovers, not the user choosing a window, so they mustn't pull us to another workspace.
     private var settledFrontPID: pid_t?
+    /// Which workspace each display showed, remembered across a display briefly vanishing
+    /// (sleep/wake, cable reconnects) so it comes back with the same workspace.
+    private var rememberedVisible: [CGDirectDisplayID: String] = [:]
+    private var loggedWindowIDs = Set<CGWindowID>()
     /// For the "[border]" debug log: only log when the outlined window changes.
     private var lastActiveBorderID: CGWindowID?
     var watchers: [pid_t: AppWatcher] = [:]
@@ -266,6 +270,7 @@ final class WindowManager {
     /// Shows `ws` on a monitor; the workspace previously there becomes hidden (parked on next layout).
     func show(_ ws: Workspace, on monitorID: CGDirectDisplayID) {
         visible[monitorID] = ws.name
+        rememberedVisible[monitorID] = ws.name
         ws.monitorID = monitorID
     }
 
@@ -276,11 +281,22 @@ final class WindowManager {
     }
 
     private func screensChanged() {
-        monitors = Monitor.current()
+        let current = Monitor.current()
+        // Mid-wake macOS can briefly report no displays; acting on that would forget every
+        // workspace-to-display assignment. Wait for the follow-up notification instead.
+        guard !current.isEmpty else { return }
+        monitors = current
+        expectSystemRearrangement()
+
         let ids = Set(monitors.map(\.id))
         visible = visible.filter { ids.contains($0.key) }
         for m in monitors where visible[m.id] == nil {
             let shown = Set(visible.values)
+            // A returning display gets back the workspace it had, if that's not shown elsewhere.
+            if let name = rememberedVisible[m.id], !shown.contains(name) {
+                show(workspace(named: name), on: m.id)
+                continue
+            }
             let candidates = config.workspaceNames + workspaces.keys.sorted()
             let name = candidates.first { !shown.contains($0) } ?? "\(shown.count + 1)"
             show(workspace(named: name), on: m.id)
@@ -288,8 +304,46 @@ final class WindowManager {
         if focusedMonitorID.map({ !ids.contains($0) }) ?? true {
             focusedMonitorID = monitors.first { $0.isMain }?.id ?? monitors.first?.id
         }
-        for w in windows.values { w.lastAppliedFrame = nil }
+        forceFullRelayout()
+    }
+
+    /// After sleep or a display change, macOS moves windows itself — including pulling windows
+    /// we parked off-screen back into view. Re-tile every visible window and re-park every
+    /// hidden one, regardless of what we think their state is.
+    private func forceFullRelayout() {
+        for w in windows.values {
+            w.lastAppliedFrame = nil
+            if w.isParked { w.needsRepark = true }
+        }
         applyLayout()
+    }
+
+    /// The window moves macOS makes during wake / display changes must not be mistaken for the
+    /// user dragging windows (which can move a window to another workspace).
+    private func expectSystemRearrangement(for seconds: Double = 5) {
+        userMovesIgnoredUntil = max(userMovesIgnoredUntil, Date().addingTimeInterval(seconds))
+        userMoved = []
+        userResized = []
+        mouseUpTimer?.invalidate()
+        mouseUpTimer = nil
+    }
+
+    /// Wake from sleep: displays and apps come back over a few seconds, so reconcile more than
+    /// once — rescan windows, restore workspace placement, re-park hidden windows.
+    func handleWake() {
+        guard isRunning else { return }
+        expectSystemRearrangement(for: 8)
+        hotkeys.ensureEnabled()
+        for delay in [0.5, 2.0, 5.0] {
+            Task { @MainActor in
+                try? await Task.sleep(for: .seconds(delay))
+                guard self.isRunning else { return }
+                let current = Monitor.current()
+                if !current.isEmpty { self.monitors = current }
+                self.scanNow()
+                self.forceFullRelayout()
+            }
+        }
     }
 
     /// Runs `exec-on-workspace-change` with AeroSpace's environment variable names, so
@@ -345,6 +399,8 @@ final class WindowManager {
         on(NotificationCenter.default, NSApplication.didChangeScreenParametersNotification) { [unowned self] _ in
             self.screensChanged()
         }
+        on(ws, NSWorkspace.didWakeNotification) { [unowned self] _ in self.handleWake() }
+        on(ws, NSWorkspace.screensDidWakeNotification) { [unowned self] _ in self.handleWake() }
     }
 
     private func attach(_ app: NSRunningApplication) {
@@ -416,7 +472,7 @@ final class WindowManager {
                 guard let id = AX.windowID(element) else { continue }
                 if AX.bool(element, "AXMinimized") == true || AX.bool(element, "AXFullScreen") == true { continue }
                 if windows[id] != nil { seen.insert(id); continue }
-                guard let kind = classify(element) else { continue }
+                guard let kind = classify(element, id: id, app: watcher.name) else { continue }
                 seen.insert(id)
                 register(element, id: id, watcher: watcher, floating: kind == .floating)
             }
@@ -432,19 +488,44 @@ final class WindowManager {
 
     /// Which windows to manage, and whether they tile. Standard, resizable windows with a
     /// fullscreen button tile; dialogs and fixed-size panels float; anything else is ignored.
-    private func classify(_ el: AXUIElement) -> WindowKind? {
+    private func classify(_ el: AXUIElement, id: CGWindowID, app: String) -> WindowKind? {
         guard AX.string(el, "AXRole") == "AXWindow" else { return nil }
         if let size = AX.size(el), size.width < 40 || size.height < 40 { return nil }
-        switch AX.string(el, "AXSubrole") {
-        case "AXStandardWindow":
-            let resizable = AX.isSettable(el, "AXSize")
-            let hasFullscreenButton = AX.hasAttribute(el, "AXFullScreenButton")
-            return resizable && hasFullscreenButton ? .tiled : .floating
-        case "AXDialog", "AXFloatingWindow", "AXSystemDialog", "AXSystemFloatingWindow":
-            return .floating
-        default:
-            return nil
+
+        // Popups, command palettes (Xcode's Quick Actions / Open Quickly), HUDs and panels live
+        // above the normal window layer. Managing them at all — tiling around them or even
+        // reshuffling borders — can make them lose focus and vanish. Leave them alone.
+        let layer = Self.windowLayer(id)
+        let subrole = AX.string(el, "AXSubrole")
+        let kind: WindowKind?
+        if layer != 0 {
+            kind = nil
+        } else {
+            switch subrole {
+            case "AXStandardWindow":
+                let resizable = AX.isSettable(el, "AXSize")
+                let hasFullscreenButton = AX.hasAttribute(el, "AXFullScreenButton")
+                kind = resizable && hasFullscreenButton ? .tiled : .floating
+            case "AXDialog", "AXFloatingWindow", "AXSystemDialog", "AXSystemFloatingWindow":
+                kind = .floating
+            default:
+                kind = nil
+            }
         }
+        if loggedWindowIDs.insert(id).inserted {   // once per window, not on every rescan
+            let layerText = layer.map { String($0) } ?? "?"
+            let verdict = kind.map { $0 == .tiled ? "tiled" : "floating" } ?? "ignored"
+            Self.log.debug("[wm] new window \(id) app=\(app, privacy: .public) subrole=\(subrole ?? "nil", privacy: .public) layer=\(layerText, privacy: .public) → \(verdict, privacy: .public)")
+        }
+        return kind
+    }
+
+    /// The window-server layer of a window: 0 for ordinary app windows, higher for floating
+    /// panels, popups, menus and HUDs. nil if the window can't be found (just closed).
+    private static func windowLayer(_ id: CGWindowID) -> Int? {
+        guard let info = CGWindowListCopyWindowInfo(.optionIncludingWindow, id) as? [[String: Any]],
+              let entry = info.first else { return nil }
+        return entry[kCGWindowLayer as String] as? Int
     }
 
     private func register(_ element: AXUIElement, id: CGWindowID, watcher: AppWatcher, floating heuristicFloating: Bool) {
@@ -535,10 +616,14 @@ final class WindowManager {
 
     /// Updates the model's notion of focus without touching macOS.
     func noteFocus(_ node: WindowNode) {
+        let changed = focusedWindowID != node.id
         focusedWindowID = node.id
         guard let ws = node.workspace else { return }
         ws.noteFocused(node)
         setFocusedMonitor(monitorID(showing: ws))
+        // An accordion's layout depends on which child is focused, so re-flow it — including
+        // when focus changed by a click rather than a hotkey.
+        if changed, Self.isInAccordion(node) { scheduleLayout() }
     }
 
     /// Focuses a window for real: raise it and make its app frontmost.
@@ -605,7 +690,7 @@ final class WindowManager {
         if borders.showsInactive {
             for name in Set(visible.values) {
                 for w in workspace(named: name).allWindows
-                where w.id != active?.id && !w.isParked && !w.watcher.isHidden {
+                where w.id != active?.id && !w.isParked && !w.watcher.isHidden && !Self.isBuriedInAccordion(w) {
                     if let frame = AX.frame(w.element) { inactive.append((w.id, frame)) }
                 }
             }
@@ -616,6 +701,36 @@ final class WindowManager {
             lastActiveBorderID = active?.id
             Self.log.debug("[border] active=\(active.map { String($0.id) } ?? "none", privacy: .public) model=\(self.focusedWindowID.map { String($0) } ?? "none", privacy: .public) frontPID=\(front.map { String($0) } ?? "none", privacy: .public)")
         }
+    }
+
+    /// False while the frontmost app's focused window is something we don't manage (a popup,
+    /// palette, sheet or dialog) — raising another window then would bury it.
+    private func systemFocusIsManaged(orIs node: WindowNode) -> Bool {
+        guard let front = NSWorkspace.shared.frontmostApplication,
+              let watcher = watchers[front.processIdentifier],
+              let element = watcher.focusedWindow,
+              let id = AX.windowID(element) else { return true }
+        return id == node.id || windows[id] != nil
+    }
+
+    static func isInAccordion(_ node: TreeNode) -> Bool {
+        var n: TreeNode = node
+        while let p = n.parent {
+            if p.layout == .accordion { return true }
+            n = p
+        }
+        return false
+    }
+
+    /// True for a window stacked behind the visible child of an accordion. Outlining those
+    /// would draw lines across the window in front.
+    static func isBuriedInAccordion(_ window: WindowNode) -> Bool {
+        var n: TreeNode = window
+        while let p = n.parent {
+            if p.layout == .accordion, let front = p.mruChild ?? p.children.first, front !== n { return true }
+            n = p
+        }
+        return false
     }
 
     /// Live preview from the settings window, before saving.
@@ -651,6 +766,13 @@ final class WindowManager {
               let applied = node.lastAppliedFrame,
               let frame = AX.frame(element),
               !Self.approximatelyEqual(frame, applied) else { return }   // our own move echoing back
+        guard NSEvent.pressedMouseButtons != 0 else {
+            // Moved without a mouse drag: macOS (display change) or another tool did it. Don't
+            // reinterpret it as the user moving windows between workspaces — just put it back.
+            node.lastAppliedFrame = nil
+            scheduleLayout()
+            return
+        }
         if resized { userResized.insert(id) } else { userMoved.insert(id) }
         waitForMouseUp()
     }
@@ -723,7 +845,7 @@ final class WindowManager {
         for ws in workspaces.values where !shown.contains(ws.name) {
             ws.normalize(flatten: config.flattenContainers, oppositeOrientation: config.oppositeOrientationForNested)
             guard let home = homeMonitor(of: ws) else { continue }
-            for node in ws.allWindows where !node.isParked {
+            for node in ws.allWindows where !node.isParked || node.needsRepark {
                 park(node, on: home)
                 wrote = true
             }
@@ -743,20 +865,29 @@ final class WindowManager {
                 usable.origin.y = barBottom
             }
             let rect = gaps.workspaceRect(in: usable)
+            var movedHere = false
             for (node, frame) in LayoutEngine.frames(for: ws, in: rect, gaps: gaps, accordionPadding: config.accordionPadding) {
                 if node.watcher.isHidden { continue }
                 let unchanged = node.lastAppliedFrame.map { Self.approximatelyEqual($0, frame) } ?? false
                 if node.isParked || !unchanged {
                     setFrame(node, frame)
                     wrote = true
+                    movedHere = true
                 }
                 node.isParked = false
+                node.needsRepark = false
             }
             for node in ws.floating where node.isParked {
                 restoreFloating(node, on: monitor)
                 wrote = true
             }
-            if let f = focusedWindow, f.workspace === ws, f.isFullscreen || f.parent?.layout == .accordion {
+            // Overlapping layouts need the focused window in front — but only right after we've
+            // rearranged them. Raising on every pass (layout runs whenever any window appears)
+            // pushed the editor over Xcode's Open Quickly / Quick Actions popups, which then lost
+            // focus and vanished. Also never raise while the user is in a window we don't manage.
+            if movedHere, let f = focusedWindow, f.workspace === ws,
+               f.isFullscreen || Self.isInAccordion(f),
+               systemFocusIsManaged(orIs: f) {
                 AX.perform(f.element, "AXRaise")
             }
         }
@@ -796,7 +927,10 @@ final class WindowManager {
 
     private func park(_ node: WindowNode, on monitor: Monitor) {
         let current = AX.frame(node.element)
-        if node.isFloating { node.floatingFrame = current }
+        // Re-parking an already-parked window: its current frame is the corner, not where the
+        // user had it — keep the remembered floating frame.
+        if node.isFloating && !node.isParked { node.floatingFrame = current }
+        node.needsRepark = false
         let size = current?.size ?? CGSize(width: 800, height: 600)
         prepareWrite(node)
         AX.setPosition(node.element, monitor.parkingOrigin(for: size, among: monitors))
@@ -813,6 +947,7 @@ final class WindowManager {
         prepareWrite(node)
         AX.setPosition(node.element, frame.origin)
         node.isParked = false
+        node.needsRepark = false
     }
 
     /// On quit: bring every parked window back onto the focused monitor, cascaded.

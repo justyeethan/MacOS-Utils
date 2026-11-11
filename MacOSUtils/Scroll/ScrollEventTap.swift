@@ -117,6 +117,15 @@ nonisolated final class ScrollEventTap: @unchecked Sendable {
         lock.lock()
     }
 
+    /// macOS can leave event taps disabled across sleep without sending the usual
+    /// "tap disabled" event; switch them back on if so.
+    func ensureEnabled() {
+        let ports = lock.withLock { [activeTap, passiveTap] }.compactMap { $0 }
+        for port in ports where !CGEvent.tapIsEnabled(tap: port) {
+            CGEvent.tapEnable(tap: port, enable: true)
+        }
+    }
+
     func stop() {
         lock.lock()
         let rl = runLoop
