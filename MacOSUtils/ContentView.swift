@@ -90,6 +90,10 @@ struct ContentView: View {
                 .help("Draws the outline itself, using active_color and width from the `borders` line in your config. Off = launch JankyBorders instead.")
                 .disabled(!model.isWindowManagerEnabled)
 
+            Toggle("Status bar", isOn: $model.isBarEnabled)
+                .toggleStyle(.switch)
+                .help("The built-in SketchyBar replacement. Off removes it completely, including its clock, volume and battery listeners.")
+
             if model.wmStatus.isRunning {
                 HStack(spacing: 4) {
                     ForEach(model.wmStatus.allWorkspaces, id: \.self) { name in

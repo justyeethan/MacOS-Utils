@@ -151,10 +151,16 @@ final class WindowManager {
             run(command)
         }
 
-        // Safety net for missed AX notifications (some apps don't send them reliably).
-        safetyTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [unowned self] _ in
+        // Safety net for missed AX notifications (a few apps don't send them reliably). Window
+        // events, app launch/quit/activate and focus changes already trigger scans, so this only
+        // catches stragglers. It queries *every* app — waking them all — so keep it rare, and give
+        // macOS slack to batch it with other wake-ups.
+        let safety = Timer(timeInterval: 30, repeats: true) { [unowned self] _ in
             MainActor.assumeIsolated { self.scheduleScan() }
         }
+        safety.tolerance = 10
+        RunLoop.main.add(safety, forMode: .default)
+        safetyTimer = safety
 
         notifyWorkspaceChangeIfNeeded()
         publishStatus()

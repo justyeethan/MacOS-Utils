@@ -39,6 +39,15 @@ final class AppModel {
             windowManager.isBorderEnabled = isFocusBorderEnabled
         }
     }
+    /// Status bar on/off (persisted). Off means no bar windows, and the clock/volume/battery
+    /// listeners are stopped too — nothing left running for it.
+    var isBarEnabled: Bool = UserDefaults.standard.object(forKey: "BarEnabled") as? Bool ?? true {
+        didSet {
+            guard isBarEnabled != oldValue else { return }
+            UserDefaults.standard.set(isBarEnabled, forKey: "BarEnabled")
+            applyBar(configDocument.bar)
+        }
+    }
     private(set) var wmStatus = WMStatus()
 
     /// Editable config for the settings window (bindings + borders).
@@ -203,12 +212,16 @@ final class AppModel {
     /// Shows/updates the bar and tells the WM how much space to keep free at the top.
     /// Also used for live preview from the Bar settings tab.
     func applyBar(_ style: BarStyle) {
-        bar.apply(style)   // deferred internally
+        // The on/off switch lives here (menu bar panel + Settings), not in the config file.
+        var effective = style
+        effective.enabled = isBarEnabled
+        bar.apply(effective)   // deferred internally
         // Relaying out windows publishes WM status (observed by SwiftUI), so this mustn't run
         // inside a SwiftUI update either — e.g. when called from the Bar tab's onChange.
         DispatchQueue.main.async { [unowned self] in
             MainActor.assumeIsolated {
-                self.windowManager.isBuiltInBarEnabled = style.enabled
+                // Off: workspace changes go back to triggering an external SketchyBar, if any.
+                self.windowManager.isBuiltInBarEnabled = effective.enabled
                 // Reserved heights come from the bar itself (per display, notch-aware).
             }
         }

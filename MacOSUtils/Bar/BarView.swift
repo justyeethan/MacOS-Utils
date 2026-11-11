@@ -200,6 +200,7 @@ enum GlyphRenderer {
 
         let image = NSImage(size: box.size, flipped: false) { _ in
             guard let ctx = NSGraphicsContext.current?.cgContext else { return false }
+            ctx.textMatrix = .identity
             ctx.textPosition = CGPoint(x: -box.minX, y: -box.minY)
             CTLineDraw(line, ctx)
             return true

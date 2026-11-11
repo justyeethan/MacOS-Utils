@@ -427,12 +427,12 @@ struct BorderSettingsView: View {
 
 struct BarSettingsView: View {
     @Bindable var doc: ConfigDocument
-    let model: AppModel
+    @Bindable var model: AppModel
 
     var body: some View {
         Form {
             Section {
-                Toggle("Show bar", isOn: $doc.bar.enabled)
+                Toggle("Show bar", isOn: $model.isBarEnabled)   // same switch as the menu bar panel; applies immediately
                 Toggle("Keep tiled windows below the bar", isOn: $doc.bar.reserveSpace)
                 Toggle("Draw over the macOS menu bar", isOn: $doc.bar.drawOverMenuBar)
                 Toggle("Same height as the menu bar", isOn: $doc.bar.matchMenuBar)
@@ -477,7 +477,7 @@ struct BarSettingsView: View {
                     }
                 }
             }
-            .disabled(!doc.bar.enabled)
+            .disabled(!model.isBarEnabled)
 
             Section("Right side") {
                 Toggle("Battery", isOn: $doc.bar.showBattery)
@@ -498,10 +498,10 @@ struct BarSettingsView: View {
                     }
                 }
             }
-            .disabled(!doc.bar.enabled)
+            .disabled(!model.isBarEnabled)
 
             Section {
-                Button("Reset to SketchyBar config") { doc.bar = BarStyle() }
+                Button("Reset bar to defaults") { doc.bar = BarStyle() }
             }
         }
         .formStyle(.grouped)
