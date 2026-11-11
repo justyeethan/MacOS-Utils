@@ -4,8 +4,8 @@ import Observation
 
 /// App-wide state on the main actor. Owns the input services and persists settings.
 ///
-/// Later this also owns the window manager (see docs/TILING_WM_PLAN.md); both features
-/// share the single Accessibility permission.
+/// Owns both features — scroll reversal and the tiling window manager — which share the single
+/// Accessibility permission.
 @MainActor
 @Observable
 final class AppModel {
@@ -23,6 +23,31 @@ final class AppModel {
     /// Most recently detected scroll source, for showing in the UI.
     private(set) var lastScrollSource: ScrollSource?
 
+    /// Tiling window manager on/off (persisted).
+    var isWindowManagerEnabled: Bool = UserDefaults.standard.object(forKey: "WMEnabled") as? Bool ?? true {
+        didSet {
+            guard isWindowManagerEnabled != oldValue else { return }
+            UserDefaults.standard.set(isWindowManagerEnabled, forKey: "WMEnabled")
+            if isWindowManagerEnabled { if isAccessibilityTrusted { windowManager.start() } }
+            else { windowManager.stop() }
+        }
+    }
+    /// Built-in focus border instead of JankyBorders (persisted).
+    var isFocusBorderEnabled: Bool = UserDefaults.standard.object(forKey: "WMFocusBorder") as? Bool ?? true {
+        didSet {
+            UserDefaults.standard.set(isFocusBorderEnabled, forKey: "WMFocusBorder")
+            windowManager.isBorderEnabled = isFocusBorderEnabled
+        }
+    }
+    private(set) var wmStatus = WMStatus()
+
+    /// Editable config for the settings window (bindings + borders).
+    let configDocument = ConfigDocument()
+    private(set) var configSaveError: String?
+    var confirmUseAeroSpaceConfig = false
+
+    @ObservationIgnored let windowManager = WindowManager()
+    @ObservationIgnored private var terminateObserver: NSObjectProtocol?
     @ObservationIgnored private let scrollStore: ScrollSettingsStore
     @ObservationIgnored private let scrollTap: ScrollEventTap
     @ObservationIgnored private var trustPoll: Timer?
@@ -36,6 +61,14 @@ final class AppModel {
         // plain constant capture, which @Sendable closures accept without complaint.
         scrollTap.onSourceChange = { [unowned self] source in
             Task { @MainActor in self.lastScrollSource = source }
+        }
+        windowManager.onStatusChange = { [unowned self] status in self.wmStatus = status }
+        windowManager.isBorderEnabled = isFocusBorderEnabled
+        // Put parked windows back on screen however the app quits (Quit button, Cmd-Q, logout).
+        terminateObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main
+        ) { [unowned self] _ in
+            MainActor.assumeIsolated { self.stopAll() }
         }
         startWhenTrusted(prompt: false)
     }
@@ -77,7 +110,7 @@ final class AppModel {
     private func startWhenTrusted(prompt: Bool) {
         isAccessibilityTrusted = Self.checkTrust(prompt: prompt)
         if isAccessibilityTrusted {
-            startScrollTap()
+            startServices()
             return
         }
         guard trustPoll == nil else { return }
@@ -87,7 +120,7 @@ final class AppModel {
                 self.trustPoll?.invalidate()
                 self.trustPoll = nil
                 self.isAccessibilityTrusted = true
-                self.startScrollTap()
+                self.startServices()
             }
         }
     }
@@ -98,7 +131,56 @@ final class AppModel {
         AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": prompt] as CFDictionary)
     }
 
-    // MARK: - Scroll tap
+    // MARK: - Services
+
+    private func startServices() {
+        startScrollTap()
+        if isWindowManagerEnabled { windowManager.start() }
+    }
+
+    func reloadWindowManagerConfig() {
+        windowManager.reloadConfig()
+    }
+
+    func switchWorkspace(_ name: String) {
+        windowManager.execute([.workspace(name)])
+    }
+
+    // MARK: - Settings window
+
+    func saveConfig() {
+        do {
+            try configDocument.save()
+            configSaveError = nil
+            windowManager.reloadConfig()
+        } catch {
+            configSaveError = error.localizedDescription
+        }
+    }
+
+    func revertConfig() {
+        configDocument.revert()
+        configSaveError = nil
+        windowManager.previewBorder(configDocument.border)
+    }
+
+    func useAeroSpaceConfig() {
+        do {
+            try configDocument.useAeroSpaceConfig()
+            configSaveError = nil
+            windowManager.reloadConfig()
+        } catch {
+            configSaveError = error.localizedDescription
+        }
+    }
+
+    func previewBorder(_ style: BorderStyle) {
+        windowManager.previewBorder(style)
+    }
+
+    func setHotkeysSuspended(_ suspended: Bool) {
+        windowManager.setHotkeysSuspended(suspended)
+    }
 
     private func startScrollTap() {
         guard !scrollTap.isRunning else { isScrollTapRunning = true; return }
@@ -112,6 +194,7 @@ final class AppModel {
     }
 
     func stopAll() {
+        windowManager.stop()   // restores parked windows first
         scrollTap.stop()
         isScrollTapRunning = false
     }
