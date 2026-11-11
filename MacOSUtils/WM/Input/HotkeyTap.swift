@@ -89,6 +89,13 @@ nonisolated final class HotkeyTap: @unchecked Sendable {
         lock.lock()
     }
 
+    /// macOS can leave event taps disabled across sleep without sending the usual
+    /// "tap disabled" event; switch it back on if so.
+    func ensureEnabled() {
+        guard let port = lock.withLock({ tap }) else { return }
+        if !CGEvent.tapIsEnabled(tap: port) { CGEvent.tapEnable(tap: port, enable: true) }
+    }
+
     func stop() {
         lock.lock()
         let rl = runLoop, port = tap

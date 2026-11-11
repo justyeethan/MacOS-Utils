@@ -60,7 +60,10 @@ enum LayoutEngine {
         let rects: [CGRect]
         switch container.layout {
         case .tiles:     rects = tiles(kids, in: rect, orientation: container.orientation, gaps: gaps)
-        case .accordion: rects = accordion(count: kids.count, in: rect, orientation: container.orientation, padding: padding)
+        case .accordion:
+            let mru = container.mruChild.flatMap { m in kids.firstIndex { $0 === m } } ?? 0
+            rects = accordion(count: kids.count, focused: mru, in: rect,
+                              orientation: container.orientation, padding: padding)
         }
 
         for (child, r) in zip(kids, rects) {
@@ -94,11 +97,28 @@ enum LayoutEngine {
         return rects
     }
 
-    /// Every child gets (almost) the whole rect; the edges of the others peek out by `padding`.
-    private static func accordion(count: Int, in rect: CGRect, orientation: Orientation, padding: CGFloat) -> [CGRect] {
+    /// AeroSpace's accordion: the focused child fills the rect minus `padding` on each side; its
+    /// immediate neighbours are pushed `padding` past it so their edges peek out on either side;
+    /// everything further away sits hidden directly behind the focused one. The first/last child
+    /// don't need room on their outer side.
+    private static func accordion(count: Int, focused: Int, in rect: CGRect,
+                                  orientation: Orientation, padding: CGFloat) -> [CGRect] {
         (0..<count).map { i in
-            let lead: CGFloat = i == 0 ? 0 : padding
-            let trail: CGFloat = i == count - 1 ? 0 : padding
+            var lead: CGFloat = 0
+            var trail: CGFloat = 0
+            if count == 1 {
+                (lead, trail) = (0, 0)
+            } else if i == focused - 1 {
+                (lead, trail) = (0, 2 * padding)        // peeks out on the leading side
+            } else if i == focused + 1 {
+                (lead, trail) = (2 * padding, 0)        // peeks out on the trailing side
+            } else if i == 0 {
+                (lead, trail) = (0, padding)
+            } else if i == count - 1 {
+                (lead, trail) = (padding, 0)
+            } else {
+                (lead, trail) = (padding, padding)
+            }
             if orientation == .horizontal {
                 return CGRect(x: rect.minX + lead, y: rect.minY,
                               width: max(1, rect.width - lead - trail), height: rect.height)

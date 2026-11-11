@@ -83,6 +83,9 @@ final class WindowNode: TreeNode {
     var floatingFrame: CGRect?
     /// True while parked in the screen corner because its workspace isn't visible.
     var isParked = false
+    /// Set after sleep / display changes: macOS may have dragged a parked window back on screen,
+    /// so park it again even though `isParked` says it's already hidden.
+    var needsRepark = false
 
     init(id: CGWindowID, watcher: AppWatcher, element: AXUIElement) {
         self.id = id

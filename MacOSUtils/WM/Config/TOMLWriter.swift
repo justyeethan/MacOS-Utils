@@ -13,7 +13,7 @@ nonisolated enum TOMLWriter {
         "accordion-padding", "default-root-container-layout", "default-root-container-orientation",
         "on-focused-monitor-changed", "automatically-unhide-macos-hidden-apps",
     ]
-    static let tableOrder = ["key-mapping", "gaps", "border", "mode"]
+    static let tableOrder = ["key-mapping", "gaps", "border", "bar", "mode"]
 
     static func write(_ root: [String: TOMLValue]) -> String {
         var out = ""

@@ -21,6 +21,7 @@ final class ConfigDocument {
     private(set) var modeNames: [String] = ["main"]
     var bindings: [String: [BindingRow]] = [:]
     var border = BorderStyle()
+    var bar = BarStyle()
 
     private(set) var sourcePath: String?
     /// Set when the config on disk couldn't be parsed; saving is disabled so it isn't clobbered.
@@ -29,11 +30,13 @@ final class ConfigDocument {
     @ObservationIgnored private var tree: [String: TOMLValue] = [:]
     private var savedBindings: [String: [BindingRow]] = [:]
     private var savedBorder = BorderStyle()
+    private var savedBar = BarStyle()
 
     init() { load() }
 
-    var isDirty: Bool { bindings != savedBindings || border != savedBorder }
+    var isDirty: Bool { bindings != savedBindings || border != savedBorder || bar != savedBar }
     var savedBorderStyle: BorderStyle { savedBorder }
+    var savedBarStyle: BarStyle { savedBar }
     var isUsingOwnFile: Bool { sourcePath == WMConfig.ownConfigPath }
 
     var sourceDescription: String {
@@ -55,6 +58,7 @@ final class ConfigDocument {
         }
         let config = (try? WMConfig.parse(text)) ?? WMConfig()
         border = config.border ?? BorderStyle()
+        bar = config.bar
 
         var result: [String: [BindingRow]] = [:]
         for (mode, value) in tree["mode"]?.table ?? [:] {
@@ -69,11 +73,13 @@ final class ConfigDocument {
 
         savedBindings = bindings
         savedBorder = border
+        savedBar = bar
     }
 
     func revert() {
         bindings = savedBindings
         border = savedBorder
+        bar = savedBar
     }
 
     // MARK: Editing
@@ -167,9 +173,10 @@ final class ConfigDocument {
         ]
         borderTable["inactive-color"] = .string(border.inactiveARGB.map(BorderStyle.hexString) ?? "none")
         t["border"] = .table(borderTable)
+        t["bar"] = .table(bar.table)
 
         let header = """
-            # MacOSUtils window manager config (AeroSpace format, plus a [border] table).
+            # MacOSUtils window manager config (AeroSpace format, plus [border] and [bar] tables).
             # Written by the MacOSUtils settings window from: \(sourceDescription)
             # Delete this file to go back to ~/.aerospace.toml.
 
@@ -193,6 +200,7 @@ final class ConfigDocument {
         sourcePath = WMConfig.ownConfigPath
         savedBindings = bindings
         savedBorder = border
+        savedBar = bar
     }
 
     /// Moves MacOSUtils' own file to the Trash so ~/.aerospace.toml is used again.

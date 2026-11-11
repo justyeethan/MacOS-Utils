@@ -34,6 +34,8 @@ nonisolated struct WMConfig: Sendable {
     var afterStartupCommands: [WMCommand] = []
     /// Built-in focus border style, taken from a `borders …` (JankyBorders) startup command if present.
     var border: BorderStyle?
+    /// Built-in bar (SketchyBar replacement), from a `[bar]` table; defaults when absent.
+    var bar = BarStyle()
     var execOnWorkspaceChange: [String] = []
     var onFocusedMonitorChanged: [WMCommand] = []
     var flattenContainers = true
@@ -118,6 +120,8 @@ nonisolated extension WMConfig {
         for case .execAndForget(let shell) in c.afterStartupCommands {
             if let style = BorderStyle.fromBordersCommand(shell) { c.border = style }
         }
+        if let b = toml["bar"]?.table { c.bar = BarStyle(table: b) }
+
         // MacOSUtils' own [border] table (written by the settings window) wins over `borders …`.
         if let b = toml["border"]?.table {
             var style = c.border ?? BorderStyle()

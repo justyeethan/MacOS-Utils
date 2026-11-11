@@ -39,6 +39,15 @@ final class AppModel {
             windowManager.isBorderEnabled = isFocusBorderEnabled
         }
     }
+    /// Status bar on/off (persisted). Off means no bar windows, and the clock/volume/battery
+    /// listeners are stopped too — nothing left running for it.
+    var isBarEnabled: Bool = UserDefaults.standard.object(forKey: "BarEnabled") as? Bool ?? true {
+        didSet {
+            guard isBarEnabled != oldValue else { return }
+            UserDefaults.standard.set(isBarEnabled, forKey: "BarEnabled")
+            applyBar(configDocument.bar)
+        }
+    }
     private(set) var wmStatus = WMStatus()
 
     /// Editable config for the settings window (bindings + borders).
@@ -47,7 +56,12 @@ final class AppModel {
     var confirmUseAeroSpaceConfig = false
 
     @ObservationIgnored let windowManager = WindowManager()
+    /// Built-in SketchyBar replacement. Runs without Accessibility (it only reads WM state).
+    @ObservationIgnored let bar = BarController()
+    /// Set by the menu-bar panel so the bar's context menu can open Settings.
+    @ObservationIgnored var openSettingsWindow: (() -> Void)?
     @ObservationIgnored private var terminateObserver: NSObjectProtocol?
+    @ObservationIgnored private var wakeObserver: NSObjectProtocol?
     @ObservationIgnored private let scrollStore: ScrollSettingsStore
     @ObservationIgnored private let scrollTap: ScrollEventTap
     @ObservationIgnored private var trustPoll: Timer?
@@ -62,15 +76,35 @@ final class AppModel {
         scrollTap.onSourceChange = { [unowned self] source in
             Task { @MainActor in self.lastScrollSource = source }
         }
-        windowManager.onStatusChange = { [unowned self] status in self.wmStatus = status }
+        windowManager.onStatusChange = { [unowned self] status in
+            self.wmStatus = status
+            self.bar.model.wm = status
+        }
         windowManager.isBorderEnabled = isFocusBorderEnabled
+        bar.onReservedHeightsChange = { [unowned self] heights in
+            self.windowManager.reservedTop = heights
+        }
+        bar.model.onSelectWorkspace = { [unowned self] name in self.switchWorkspace(name) }
+        bar.model.onOpenSettings = { [unowned self] in self.openSettingsWindow?() }
         // Put parked windows back on screen however the app quits (Quit button, Cmd-Q, logout).
         terminateObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification, object: nil, queue: .main
         ) { [unowned self] _ in
             MainActor.assumeIsolated { self.stopAll() }
         }
-        startWhenTrusted(prompt: false)
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [unowned self] _ in
+            MainActor.assumeIsolated { self.scrollTap.ensureEnabled() }   // WM handles its own wake
+        }
+        // SwiftUI builds this model while the app is still launching — before AppKit can
+        // position windows. Creating the bar (or border) windows here crashed in
+        // NSWindow._setFrame. Defer everything that makes windows until the run loop is
+        // running, i.e. after launch has finished.
+        Task { @MainActor in
+            self.applyBar(self.configDocument.bar)
+            self.startWhenTrusted(prompt: false)
+        }
     }
 
     // MARK: - Permissions
@@ -153,6 +187,7 @@ final class AppModel {
             try configDocument.save()
             configSaveError = nil
             windowManager.reloadConfig()
+            applyBar(configDocument.bar)
         } catch {
             configSaveError = error.localizedDescription
         }
@@ -162,6 +197,7 @@ final class AppModel {
         configDocument.revert()
         configSaveError = nil
         windowManager.previewBorder(configDocument.border)
+        applyBar(configDocument.bar)
     }
 
     func useAeroSpaceConfig() {
@@ -169,6 +205,7 @@ final class AppModel {
             try configDocument.useAeroSpaceConfig()
             configSaveError = nil
             windowManager.reloadConfig()
+            applyBar(configDocument.bar)
         } catch {
             configSaveError = error.localizedDescription
         }
@@ -176,6 +213,24 @@ final class AppModel {
 
     func previewBorder(_ style: BorderStyle) {
         windowManager.previewBorder(style)
+    }
+
+    /// Shows/updates the bar and tells the WM how much space to keep free at the top.
+    /// Also used for live preview from the Bar settings tab.
+    func applyBar(_ style: BarStyle) {
+        // The on/off switch lives here (menu bar panel + Settings), not in the config file.
+        var effective = style
+        effective.enabled = isBarEnabled
+        bar.apply(effective)   // deferred internally
+        // Relaying out windows publishes WM status (observed by SwiftUI), so this mustn't run
+        // inside a SwiftUI update either — e.g. when called from the Bar tab's onChange.
+        DispatchQueue.main.async { [unowned self] in
+            MainActor.assumeIsolated {
+                // Off: workspace changes go back to triggering an external SketchyBar, if any.
+                self.windowManager.isBuiltInBarEnabled = effective.enabled
+                // Reserved heights come from the bar itself (per display, notch-aware).
+            }
+        }
     }
 
     func setHotkeysSuspended(_ suspended: Bool) {

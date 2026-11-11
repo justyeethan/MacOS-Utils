@@ -14,6 +14,8 @@ struct SettingsView: View {
                     .tabItem { Label("Keybindings", systemImage: "keyboard") }
                 BorderSettingsView(doc: doc, model: model)
                     .tabItem { Label("Border", systemImage: "square.dashed") }
+                BarSettingsView(doc: doc, model: model)
+                    .tabItem { Label("Bar", systemImage: "menubar.rectangle") }
             }
             .padding([.horizontal, .top])
 
@@ -418,5 +420,100 @@ struct BorderSettingsView: View {
         func byte(_ v: CGFloat) -> UInt32 { UInt32((max(0, min(1, v)) * 255).rounded()) }
         return byte(c.alphaComponent) << 24 | byte(c.redComponent) << 16
              | byte(c.greenComponent) << 8 | byte(c.blueComponent)
+    }
+}
+
+// MARK: - Bar
+
+struct BarSettingsView: View {
+    @Bindable var doc: ConfigDocument
+    @Bindable var model: AppModel
+
+    var body: some View {
+        Form {
+            Section {
+                Toggle("Show bar", isOn: $model.isBarEnabled)   // same switch as the menu bar panel; applies immediately
+                Toggle("Keep tiled windows below the bar", isOn: $doc.bar.reserveSpace)
+                Toggle("Draw over the macOS menu bar", isOn: $doc.bar.drawOverMenuBar)
+                Toggle("Same height as the menu bar", isOn: $doc.bar.matchMenuBar)
+                    .help("Matches the notch strip on displays with a notch, and the menu bar elsewhere.")
+                LabeledContent("Height") {
+                    HStack {
+                        Slider(value: $doc.bar.height, in: 24...60, step: 1)
+                        Text("\(Int(doc.bar.height)) pt").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+                .disabled(doc.bar.matchMenuBar)
+                ColorPicker("Background", selection: argbBinding(\.backgroundARGB), supportsOpacity: true)
+                Toggle("Blur behind the bar", isOn: $doc.bar.blur)
+            } header: {
+                Text("Bar")
+            } footer: {
+                Text("Like SketchyBar, the bar sits under the macOS menu bar unless “Draw over” is on — turn on System Settings › Control Center › “Automatically hide and show the menu bar” so it's visible. Right-click the bar for Settings.")
+            }
+
+            Section("Workspaces") {
+                Toggle("Show workspaces", isOn: $doc.bar.showWorkspaces)
+                Picker("Numbers", selection: $doc.bar.numerals) {
+                    Text("Chinese (一 二 三)").tag(BarStyle.Numerals.chinese)
+                    Text("Arabic (1 2 3)").tag(BarStyle.Numerals.arabic)
+                }
+                Picker("App icons", selection: $doc.bar.appIcons) {
+                    Text(BarModel.hasAppFont ? "Automatic (sketchybar-app-font)" : "Automatic (app icons — app font not installed)")
+                        .tag(BarStyle.AppIcons.automatic)
+                    Text("sketchybar-app-font").tag(BarStyle.AppIcons.appFont)
+                    Text("App icons").tag(BarStyle.AppIcons.appIcons)
+                    Text("None").tag(BarStyle.AppIcons.none)
+                }
+                ColorPicker("Number color", selection: argbBinding(\.workspaceTextARGB), supportsOpacity: true)
+                ColorPicker("Workspace background", selection: argbBinding(\.pillARGB), supportsOpacity: true)
+                ColorPicker("Focused background", selection: argbBinding(\.focusedPillARGB), supportsOpacity: true)
+                ColorPicker("Focused outline", selection: argbBinding(\.focusedOutlineARGB), supportsOpacity: true)
+                LabeledContent("Focused outline width") {
+                    HStack {
+                        Slider(value: $doc.bar.focusedOutlineWidth, in: 0...5, step: 0.5)
+                        Text(String(format: "%.1f pt", doc.bar.focusedOutlineWidth))
+                            .monospacedDigit().frame(width: 52, alignment: .trailing)
+                    }
+                }
+            }
+            .disabled(!model.isBarEnabled)
+
+            Section("Right side") {
+                Toggle("Battery", isOn: $doc.bar.showBattery)
+                Toggle("Volume", isOn: $doc.bar.showVolume)
+                Toggle("Clock", isOn: $doc.bar.showClock)
+                ColorPicker("Text color", selection: argbBinding(\.textARGB), supportsOpacity: true)
+                TextField("Icon font", text: $doc.bar.iconFont)
+                if !model.bar.model.hasIconFont {
+                    Label("“\(doc.bar.iconFont)” isn't installed; using SF Symbols for icons.",
+                          systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                LabeledContent("Font size") {
+                    HStack {
+                        Slider(value: $doc.bar.fontSize, in: 11...24, step: 1)
+                        Text("\(Int(doc.bar.fontSize)) pt").monospacedDigit().frame(width: 44, alignment: .trailing)
+                    }
+                }
+            }
+            .disabled(!model.isBarEnabled)
+
+            Section {
+                Button("Reset bar to defaults") { doc.bar = BarStyle() }
+            }
+        }
+        .formStyle(.grouped)
+        .onChange(of: doc.bar) {
+            model.applyBar(doc.bar)   // live preview; Save keeps it
+        }
+    }
+
+    private func argbBinding(_ keyPath: WritableKeyPath<BarStyle, UInt32>) -> Binding<Color> {
+        Binding(
+            get: { BorderSettingsView.color(doc.bar[keyPath: keyPath]) },
+            set: { doc.bar[keyPath: keyPath] = BorderSettingsView.argb($0) }
+        )
     }
 }
