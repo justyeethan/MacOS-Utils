@@ -1,8 +1,9 @@
 import SwiftUI
 
-/// Menu-bar panel. Scroll settings for now; window-manager controls go here later.
+/// Menu-bar panel: window manager status and scroll settings.
 struct ContentView: View {
     @Bindable var model: AppModel
+    @Environment(\.openWindow) private var openWindow
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
@@ -11,6 +12,10 @@ struct ContentView: View {
             if !model.isAccessibilityTrusted {
                 permissionBanner
             }
+
+            windowManagerSection
+
+            Divider()
 
             Toggle("Manage scroll direction", isOn: $model.scrollSettings.enabled)
                 .toggleStyle(.switch)
@@ -49,6 +54,10 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.secondary)
                 }
                 Spacer()
+                Button("Settings…") {
+                    openWindow(id: "settings")
+                    NSApp.activate()   // menu-bar apps aren't active by default
+                }
                 Button("Quit") {
                     model.stopAll()
                     NSApp.terminate(nil)
@@ -71,11 +80,74 @@ struct ContentView: View {
         }
     }
 
+    private var windowManagerSection: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Toggle("Tiling window manager", isOn: $model.isWindowManagerEnabled)
+                .toggleStyle(.switch)
+
+            Toggle("Focused window border", isOn: $model.isFocusBorderEnabled)
+                .help("Draws the outline itself, using active_color and width from the `borders` line in your config. Off = launch JankyBorders instead.")
+                .disabled(!model.isWindowManagerEnabled)
+
+            if model.wmStatus.isRunning {
+                HStack(spacing: 4) {
+                    ForEach(model.wmStatus.allWorkspaces, id: \.self) { name in
+                        workspaceButton(name)
+                    }
+                }
+                HStack {
+                    Text("\(model.wmStatus.windowCount) windows")
+                    if model.wmStatus.mode != "main" {
+                        Text("· mode: \(model.wmStatus.mode)").foregroundStyle(.orange)
+                    }
+                    Spacer()
+                    Button("Reload Config") { model.reloadWindowManagerConfig() }
+                        .controlSize(.small)
+                }
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+                Text("Config: \(model.wmStatus.configSource)")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+
+                ForEach(model.wmStatus.configErrors, id: \.self) { error in
+                    Label(error, systemImage: "exclamationmark.triangle")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                }
+            }
+        }
+    }
+
+    private func workspaceButton(_ name: String) -> some View {
+        let isFocused = model.wmStatus.focusedWorkspace == name
+        let isOccupied = model.wmStatus.occupiedWorkspaces.contains(name)
+        let isVisible = model.wmStatus.visibleWorkspaces.contains(name)
+        return Button {
+            model.switchWorkspace(name)
+        } label: {
+            Text(name)
+                .font(.system(.caption, design: .monospaced).weight(isFocused ? .bold : .regular))
+                .frame(minWidth: 22, minHeight: 20)
+                .background(
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(isFocused ? Color.accentColor.opacity(0.85)
+                              : isVisible ? Color.accentColor.opacity(0.3)
+                              : isOccupied ? Color.secondary.opacity(0.25) : Color.clear)
+                )
+                .foregroundStyle(isFocused ? Color.white : isOccupied || isVisible ? Color.primary : Color.secondary)
+        }
+        .buttonStyle(.plain)
+    }
+
     private var permissionBanner: some View {
         VStack(alignment: .leading, spacing: 6) {
             Text("Accessibility access needed")
                 .fontWeight(.semibold)
-            Text("Scroll reversal and window management both need permission to read and modify input events.")
+            Text("Scroll reversal and window management both need Accessibility permission to read input and move windows.")
                 .font(.caption)
                 .foregroundStyle(.secondary)
             HStack {

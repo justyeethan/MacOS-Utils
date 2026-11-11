@@ -96,7 +96,7 @@ nonisolated final class ScrollEventTap: @unchecked Sendable {
         let ready = DispatchSemaphore(value: 0)
         let thread = Thread { [self] in
             let rl = CFRunLoopGetCurrent()!
-            for port in [active, passive].compactMap({ $0 }) {
+            for port in [self.activeTap, self.passiveTap].compactMap({ $0 }) {
                 let src = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, port, 0)
                 CFRunLoopAddSource(rl, src, .commonModes)
                 CGEvent.tapEnable(tap: port, enable: true)
