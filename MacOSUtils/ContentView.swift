@@ -58,6 +58,7 @@ struct ContentView: View {
                     openWindow(id: "settings")
                     NSApp.activate()   // menu-bar apps aren't active by default
                 }
+
                 Button("Quit") {
                     model.stopAll()
                     NSApp.terminate(nil)

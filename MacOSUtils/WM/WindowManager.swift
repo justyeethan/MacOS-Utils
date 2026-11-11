@@ -13,6 +13,22 @@ struct WMStatus: Equatable {
     var configSource = ""
     var configErrors: [String] = []
     var windowCount = 0
+    /// Per-workspace detail for the bar (what `aerospace list-windows` gave SketchyBar).
+    var workspaces: [WorkspaceInfo] = []
+
+    struct AppRef: Equatable {
+        var name: String
+        var pid: pid_t
+    }
+
+    struct WorkspaceInfo: Equatable {
+        var name: String
+        /// Display it's shown on, or was last shown on.
+        var monitorID: CGDirectDisplayID?
+        var isVisible: Bool
+        /// One entry per window, tiled windows in tree order then floating ones.
+        var apps: [AppRef]
+    }
 }
 
 /// AeroSpace-style tiling window manager.
@@ -42,6 +58,17 @@ final class WindowManager {
             if isBorderEnabled { updateBorder() } else { borders.hideAll(); runBordersCommands() }
         }
     }
+    /// Height of the built-in bar at the top of each display (taller on notched displays);
+    /// tiled windows stay below it. Empty when the bar is off or not reserving space.
+    var reservedTop: [CGDirectDisplayID: CGFloat] = [:] {
+        didSet {
+            guard reservedTop != oldValue, isRunning else { return }
+            for w in windows.values { w.lastAppliedFrame = nil }
+            applyLayout()
+        }
+    }
+    /// When the built-in bar is on, don't also poke an external SketchyBar on workspace change.
+    var isBuiltInBarEnabled = false
     /// Mode to restore after hotkeys were suspended (e.g. while recording a shortcut).
     private var modeBeforeSuspend: String?
 
@@ -55,6 +82,12 @@ final class WindowManager {
     /// Apps whose AXEnhancedUserInterface we switched off for the current batch of writes.
     private var enhancedUIRestore: [pid_t: AXUIElement] = [:]
     private var enhancedUIChecked = Set<pid_t>()
+    /// The app that was frontmost once our last workspace switch / focus change settled.
+    /// On an empty workspace that app (now hidden) stays frontmost; focus reports from it are
+    /// leftovers, not the user choosing a window, so they mustn't pull us to another workspace.
+    private var settledFrontPID: pid_t?
+    /// For the "[border]" debug log: only log when the outlined window changes.
+    private var lastActiveBorderID: CGWindowID?
     var watchers: [pid_t: AppWatcher] = [:]
     var windows: [CGWindowID: WindowNode] = [:]
     var workspaces: [String: Workspace] = [:]
@@ -147,6 +180,7 @@ final class WindowManager {
         visible = [:]
         focusedWindowID = nil
         lastSystemFocusedID = nil
+        settledFrontPID = nil
         lastNotifiedWorkspace = nil
         previousWorkspace = nil
         userResized = []
@@ -260,6 +294,9 @@ final class WindowManager {
         let prev = lastNotifiedWorkspace ?? ""
         lastNotifiedWorkspace = current
         guard !config.execOnWorkspaceChange.isEmpty else { return }
+        if isBuiltInBarEnabled, config.execOnWorkspaceChange.contains(where: { $0.contains("sketchybar") }) {
+            return   // the built-in bar replaces SketchyBar
+        }
         Exec.run(config.execOnWorkspaceChange, extraEnvironment: [
             "AEROSPACE_FOCUSED_WORKSPACE": current,
             "AEROSPACE_PREV_WORKSPACE": prev,
@@ -472,6 +509,13 @@ final class WindowManager {
         lastSystemFocusedID = id
         guard let node = windows[id], let ws = node.workspace else { return }
 
+        // Sitting on an empty workspace, the app we switched away from is still frontmost and may
+        // shuffle its (hidden) windows' focus. Only a real app switch — Cmd-Tab, Dock, a click on
+        // another app — should take us to a hidden workspace.
+        if !isVisible(ws), focusedWindow == nil, front.processIdentifier == settledFrontPID {
+            return
+        }
+
         if !isVisible(ws), let mid = focusedMonitor?.id {
             previousWorkspace = focusedWorkspace.name
             suppressFocusSync()
@@ -519,6 +563,7 @@ final class WindowManager {
 
     private func rebaseSystemFocus() {
         guard isRunning, Date() >= focusSyncSuppressedUntil else { return }   // a newer suppression is pending
+        settledFrontPID = NSWorkspace.shared.frontmostApplication?.processIdentifier
         guard let front = NSWorkspace.shared.frontmostApplication,
               let watcher = watchers[front.processIdentifier],
               let element = watcher.focusedWindow,
@@ -560,6 +605,11 @@ final class WindowManager {
             }
         }
         borders.update(active: active, inactive: inactive)
+
+        if active?.id != lastActiveBorderID {
+            lastActiveBorderID = active?.id
+            Self.log.debug("[border] active=\(active.map { String($0.id) } ?? "none", privacy: .public) model=\(self.focusedWindowID.map { String($0) } ?? "none", privacy: .public) frontPID=\(front.map { String($0) } ?? "none", privacy: .public)")
+        }
     }
 
     /// Live preview from the settings window, before saving.
@@ -679,7 +729,14 @@ final class WindowManager {
             ws.normalize(flatten: config.flattenContainers, oppositeOrientation: config.oppositeOrientationForNested)
 
             let gaps = ResolvedGaps(config.gaps, monitor: monitor, all: monitors)
-            let rect = gaps.workspaceRect(in: monitor.visibleFrame)
+            var usable = monitor.visibleFrame
+            // visibleFrame already excludes the menu bar / notch strip; the bar may reach lower.
+            let barBottom = monitor.frame.minY + (reservedTop[mid] ?? 0)
+            if usable.minY < barBottom {
+                usable.size.height -= barBottom - usable.minY
+                usable.origin.y = barBottom
+            }
+            let rect = gaps.workspaceRect(in: usable)
             for (node, frame) in LayoutEngine.frames(for: ws, in: rect, gaps: gaps, accordionPadding: config.accordionPadding) {
                 if node.watcher.isHidden { continue }
                 let unchanged = node.lastAppliedFrame.map { Self.approximatelyEqual($0, frame) } ?? false
@@ -790,18 +847,28 @@ final class WindowManager {
             mode: hotkeys.currentMode,
             configSource: config.source,
             configErrors: config.errors,
-            windowCount: windows.count
+            windowCount: windows.count,
+            workspaces: workspaces.values.map { ws in
+                WMStatus.WorkspaceInfo(
+                    name: ws.name,
+                    monitorID: monitorID(showing: ws) ?? ws.monitorID,
+                    isVisible: isVisible(ws),
+                    apps: ws.allWindows.map { .init(name: $0.watcher.name, pid: $0.watcher.pid) })
+            }.sorted { Self.nameOrder($0.name, $1.name) }
         )
     }
 
     static func sortNames(_ names: [String]) -> [String] {
-        names.sorted { a, b in
-            switch (Int(a), Int(b)) {
-            case let (x?, y?): x < y
-            case (_?, nil):    true
-            case (nil, _?):    false
-            default:           a < b
-            }
+        names.sorted(by: nameOrder)
+    }
+
+    /// Numeric workspaces in number order, then named ones alphabetically.
+    static func nameOrder(_ a: String, _ b: String) -> Bool {
+        switch (Int(a), Int(b)) {
+        case let (x?, y?): x < y
+        case (_?, nil):    true
+        case (nil, _?):    false
+        default:           a < b
         }
     }
 }

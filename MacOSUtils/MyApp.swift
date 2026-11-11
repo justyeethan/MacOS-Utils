@@ -8,12 +8,7 @@ import SwiftUI
         MenuBarExtra {
             ContentView(model: model)
         } label: {
-            // Focused workspace number, like AeroSpace's menu bar item.
-            if model.wmStatus.isRunning, !model.wmStatus.focusedWorkspace.isEmpty {
-                Text(model.wmStatus.focusedWorkspace)
-            } else {
-                Image(systemName: "rectangle.split.3x1")
-            }
+            MenuBarLabel(model: model)
         }
         .menuBarExtraStyle(.window)
 
@@ -22,5 +17,28 @@ import SwiftUI
         }
         .defaultSize(width: 760, height: 560)
         .defaultLaunchBehavior(.suppressed)   // only open when asked
+    }
+}
+
+/// Status item label: the focused workspace number, like AeroSpace's menu bar item. It exists
+/// for the app's whole lifetime, so it's also where the bar gets its "open Settings" action.
+private struct MenuBarLabel: View {
+    let model: AppModel
+    @Environment(\.openWindow) private var openWindow
+
+    var body: some View {
+        Group {
+            if model.wmStatus.isRunning, !model.wmStatus.focusedWorkspace.isEmpty {
+                Text(model.wmStatus.focusedWorkspace)
+            } else {
+                Image(systemName: "rectangle.split.3x1")
+            }
+        }
+        .onAppear {
+            model.openSettingsWindow = { [openWindow] in
+                openWindow(id: "settings")
+                NSApp.activate()
+            }
+        }
     }
 }
